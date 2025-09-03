@@ -1,0 +1,223 @@
+trigger:
+  branches:
+    include: [ main, release/* ]
+pr:
+  branches:
+    include: [ main ]
+
+variables:
+  ACR_NAME: 'myacr'
+  IMAGE_NAME: 'myapp'
+  SEMVER: '0.0.0'
+  IMAGE_TAG: 'sha-$(Build.SourceVersion:~7)'
+  BUILD_ID: '$(Build.BuildId)'
+  COVERAGE_THRESHOLD: 80
+
+stages:
+- stage: PR_Checks
+  displayName: 'PR checks: lint, unit tests, quick scans'
+  jobs:
+  - job: PR_Validation
+    displayName: 'Run linters, unit tests, SAST quick scan'
+    pool: { vmImage: 'ubuntu-latest' }
+    steps:
+    - checkout: self
+    - script: |
+        echo "Install dependencies and run linter"
+        # example: npm ci && npm run lint
+        echo "FAKE: running linter"
+      displayName: 'Lint'
+    - script: |
+        echo "Run fast unit tests"
+        # example: pytest -q
+        echo "FAKE: running unit tests"
+        # Create fake coverage file - pipeline will read it
+        mkdir -p coverage
+        echo "mode: count" > coverage/coverage.out
+        echo "github.com/example 80.0" >> coverage/coverage.out
+      displayName: 'Unit tests'
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '/test-results.xml'
+        failTaskOnFailedTests: true
+      condition: always()
+    - script: |
+        # Fake quick dependency scan
+        echo "FAKE: dependency scan - no critical issues"
+      displayName: 'Dependency quick-scan'
+
+- stage: CI_Build
+  displayName: 'CI: Build, full tests, SAST, image build & push'
+  dependsOn: PR_Checks
+  condition: succeeded()
+  jobs:
+  - job: Build_and_Scan
+    displayName: 'Build, full tests, SAST, SBOM, image build'
+    pool: { vmImage: 'ubuntu-latest' }
+    timeoutInMinutes: 60
+    steps:
+    - checkout: self
+    - script: |
+        echo "Install deps"
+        echo "FAKE: installing dependencies"
+      displayName: 'Install Dependencies'
+    - script: |
+        echo "Run full unit + integration tests"
+        echo "FAKE: running tests and generating coverage"
+        # produce a fake coverage percentage file
+        echo '{"coverage_percent":82}' > coverage-summary.json
+      displayName: 'Run full tests'
+    - script: |
+        COVERAGE=$(jq .coverage_percent coverage-summary.json)
+        echo "##vso[task.setvariable variable=CODE_COVERAGE]$COVERAGE"
+        echo "Coverage = $COVERAGE"
+      displayName: 'Parse coverage'
+    - script: |
+        if [ $(jq .coverage_percent coverage-summary.json) -lt $(echo $(COVERAGE_THRESHOLD)) ]; then
+          echo "Coverage below threshold"; exit 1
+        else
+          echo "Coverage OK"
+        fi
+      displayName: 'Enforce coverage threshold'
+    - task: SonarCloudPrepare@1
+      displayName: 'Prepare SonarCloud'
+      inputs:
+        SonarCloud: 'sonar-service-connection'
+        organization: 'your-org'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'myapp'
+    - script: |
+        echo "FAKE: run Sonar analysis"
+      displayName: 'Run SonarCloud'
+    - script: |
+        echo "Build container image"
+        # Example using docker with ACR login (here FAKE)
+        echo "FAKE: docker build -t $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG) ."
+      displayName: 'Build container image'
+    - script: |
+        echo "Generate SBOM (FAKE)"
+        echo "{ 'sbom': 'fake' }" > sbom.json
+      displayName: 'Generate SBOM'
+    - script: |
+        echo "Container image scan (Trivy)"
+        echo "No critical CVEs found"
+      displayName: 'Scan container image'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'sbom.json'
+        ArtifactName: 'sbom'
+        publishLocation: 'Container'
+
+- stage: Publish
+  displayName: 'Publish artifacts & push image to ACR'
+  dependsOn: CI_Build
+  condition: succeeded()
+  jobs:
+  - job: PushArtifacts
+    displayName: 'Push image to ACR'
+    pool: { vmImage: 'ubuntu-latest' }
+    steps:
+    - script: |
+        echo "FAKE: az acr login --name $(ACR_NAME)"
+        echo "FAKE: docker push $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG)"
+        echo "FAKE: docker tag ... $(ACR_NAME).azurecr.io/$(IMAGE_NAME):v$(SEMVER)"
+      displayName: 'Push image to ACR'
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: 'coverage-summary.json'
+        ArtifactName: 'coverage'
+        publishLocation: 'Container'
+
+- stage: Deploy_UAT
+  displayName: 'Deploy → UAT'
+  dependsOn: Publish
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToUAT
+    displayName: 'Deploy to UAT
+    environment: 'UAT'
+    pool: { vmImage: 'ubuntu-latest' }
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              echo "FAKE: pull image $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG)"
+              echo "FAKE: helm upgrade --install myapp-u --f values-uat.yaml ."
+            displayName: 'Deploy'
+          - script: |
+              echo "Run smoke tests against UAT"
+              echo "FAKE: curl -sS https://uat.example.com/health | grep OK"
+            displayName: 'Smoke tests (UAT)'
+          - script: |
+              echo "Post deploy verification: check logs and metrics (FAKE)"
+            displayName: 'Post-deploy verification'
+          - script: |
+              echo "If checks fail, pipeline will fail and notify"
+            displayName: 'Verification summary'
+
+- stage: Deploy_QA
+  displayName: 'Deploy → QA'
+  dependsOn: Deploy_UAT
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToQA
+    displayName: 'Deploy to QA'
+    environment: 'QA'
+    pool: { vmImage: 'ubuntu-latest' }
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              echo "FAKE: Deploying to QA"
+              sleep 2
+            displayName: 'Deploy'
+          - script: |
+              echo "Run integration tests in QA"
+            displayName: 'Integration tests (QA)'
+
+- stage: Deploy_Staging
+  displayName: 'Deploy → Staging (gated)'
+  dependsOn: Deploy_QA
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToStaging
+    displayName: 'Deploy to Staging (canary demo)'
+    environment: 'Staging'
+    pool: { vmImage: 'ubuntu-latest' }
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              echo "FAKE: Deploy new version to staging (20% canary)"
+            displayName: 'Canary deploy'
+          - script: |
+              echo "Wait for canary metrics..."
+              sleep 10
+              echo "FAKE: evaluate canary metrics => OK"
+            displayName: 'Canary verification'
+
+- stage: Deploy_Prod
+  displayName: 'Deploy → Prod (manual approvals + business ops checks)'
+  dependsOn: Deploy_Staging
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToProd
+    displayName: 'Deploy to Production'
+    environment: 'Prod'
+    pool: { vmImage: 'ubuntu-latest' }
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              echo "FAKE: Production deployment - will not actually change infra"
+              echo "Image: $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG)"
+            displayName: 'Deploy (FAKE) - NOOP'
+          - script: |
+              echo "Post deploy verification in Prod (FAKE): run smoke & golden tests"
+            displayName: 'Post-deploy smoke'
